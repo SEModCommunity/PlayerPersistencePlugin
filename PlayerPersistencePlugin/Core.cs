@@ -21,14 +21,16 @@ using System.IO;
 
 namespace PlayerPersistencePlugin
 {
-    public class Core : PluginBase, IPlayerEventHandler
+    public class Core : PluginBase, IPlayerEventHandler, ICharacterEventHandler
 	{
 		#region "Attributes and Constant"
 
 		const string FILE_PREFIX = "player_";
 		const string FILE_SUFFIX = ".sbc";
+		const string CONSOLE_PREFIX = "[PPP]: ";
 
-		SandboxGameAssemblyWrapper m_gameAssemblyWrapper;
+		private SandboxGameAssemblyWrapper m_gameAssemblyWrapper;
+		private Dictionary<ulong, CharacterEntity> m_deletedCharacterEntity;
 
 		#endregion
 
@@ -37,11 +39,13 @@ namespace PlayerPersistencePlugin
 		public Core()
 		{
 			m_gameAssemblyWrapper = SandboxGameAssemblyWrapper.Instance;
+
+			m_deletedCharacterEntity = new Dictionary<ulong, CharacterEntity>();
 		}
 
 		public override void Init()
 		{
-			Console.WriteLine("Player Persistence Plugin '" + Id + "' initialized!");
+			Console.WriteLine(CONSOLE_PREFIX + "Player Persistence Plugin '" + Id + "' initialized!");
 		}
 
 		#endregion
@@ -55,27 +59,28 @@ namespace PlayerPersistencePlugin
 		/// </summary>
 		/// <param name="remoteUserId">Steam ID of the player</param>
 		/// <param name="character">Ingame Character of the player</param>
-		public void OnPlayerJoined(ulong remoteUserId, CharacterEntity character)
+		public void OnPlayerJoined(ulong remoteUserId)
 		{
-			Console.WriteLine("Player " + character.Name + " joined the server. Loading player data...");
+			Console.WriteLine(CONSOLE_PREFIX + "Player " + remoteUserId + " joined the server. Loading player data...");
 			try
 			{
-				CharacterEntity playerInfo = GetPlayerInfo(remoteUserId);
+				//CharacterEntity player = GetPlayerEntity(remoteUserId);
+				CharacterEntity playerInfo = LoadPlayerInfo(remoteUserId);
 
 				if (playerInfo == null)
 				{
-					Console.WriteLine("Player " + character.Name + " ("+remoteUserId+") has no saved data.");
+					Console.WriteLine(CONSOLE_PREFIX + "Player " + remoteUserId + " (" + remoteUserId + ") has no saved data.");
 				}
 				else
 				{
-					Console.WriteLine("Finished loading " + character.Name + " data.");
+					Console.WriteLine(CONSOLE_PREFIX + "Finished loading " + remoteUserId + " data.");
 				}
 			}
 			catch(Exception ex)
 			{
-				Console.WriteLine("Error: Could not load " + character.Name + " (" + remoteUserId + ") data.");
-				Console.WriteLine("Read the server log for more details.");
-				LogManager.GameLog.WriteLine(ex);
+				Console.WriteLine(CONSOLE_PREFIX + "Error: An error occured while trying to read " + remoteUserId + " data.");
+				Console.WriteLine(CONSOLE_PREFIX + "Read the server log for more details.");
+				LogManager.APILog.WriteLine(CONSOLE_PREFIX + ex);
 			}
 		}
 
@@ -84,11 +89,24 @@ namespace PlayerPersistencePlugin
 		/// </summary>
 		/// <param name="remoteUserId">Steam ID of the player</param>
 		/// <param name="character">Ingame Character of the player</param>
-		public void OnPlayerLeft(ulong remoteUserId, CharacterEntity character)
+		public void OnPlayerLeft(ulong remoteUserId)
 		{
-			Console.WriteLine("Player " + character.Name + " left the server. Saving player data...");
-			SavePlayerInfo(remoteUserId, character);
-			Console.WriteLine("Player " + character.Name + "'s data saved correctly.");
+			try
+			{
+				CharacterEntity player = m_deletedCharacterEntity[remoteUserId];
+
+				Console.WriteLine(CONSOLE_PREFIX + "Player " + remoteUserId + " left the server. Saving player data...");
+
+				//CharacterEntity player = GetPlayerEntity(remoteUserId);			
+				SavePlayerInfo(remoteUserId, player);
+				Console.WriteLine(CONSOLE_PREFIX + "Player " + player.Name + "'s (" + remoteUserId + ") data saved correctly.");
+			}
+			catch (Exception ex)
+			{
+				Console.WriteLine(CONSOLE_PREFIX + "Error: An error occured while trying to save " + remoteUserId + " data.");
+				Console.WriteLine(CONSOLE_PREFIX + "Read the server log for more details.");
+				LogManager.APILog.WriteLine(CONSOLE_PREFIX + ex);
+			}
 		}
 
 		#endregion
@@ -99,15 +117,24 @@ namespace PlayerPersistencePlugin
 		public override void Update()
 		{ }
 
-		/// <summary>
-		/// Get the path of the loaded save file.
-		/// </summary>
-		/// <returns>Path to the loaded save file</returns>
-		private string GetSavePath()
+		public override void Shutdown()
 		{
-			string worldPath = m_gameAssemblyWrapper.GetServerConfig().LoadWorld;
-			MyFSPath path = new MyFSPath(MyFSLocationEnum.Saves, worldPath);
-			return path.Relative + @"\";
+		}
+
+		/// <summary>
+		/// Get the player entity of the player with the specified steam Id
+		/// </summary>
+		/// <param name="steamId">Steam Id of the player</param>
+		/// <returns></returns>
+		private CharacterEntity GetPlayerEntity(ulong steamId)
+		{
+			foreach (CharacterEntity character in SectorObjectManager.Instance.GetTypedInternalData<CharacterEntity>())
+			{
+				if (character.SteamId == steamId)
+					return character;
+			}	
+
+			return null;
 		}
 
 		/// <summary>
@@ -115,9 +142,9 @@ namespace PlayerPersistencePlugin
 		/// </summary>
 		/// <param name="steamId">Steam Id of the player</param>
 		/// <returns>Return the character of the player, or null if no info were found</returns>
-		private CharacterEntity GetPlayerInfo(ulong steamId)
+		private CharacterEntity LoadPlayerInfo(ulong steamId)
 		{
-			string worldPath = GetSavePath();
+			string worldPath = MyFileSystem.SavesPath;
 			worldPath += FILE_PREFIX + steamId + FILE_SUFFIX;
 
 			if (!File.Exists(worldPath))
@@ -136,12 +163,36 @@ namespace PlayerPersistencePlugin
 		/// <param name="character">Character of the player</param>
 		private void SavePlayerInfo(ulong steamId, CharacterEntity character)
 		{
-			string worldPath = GetSavePath();
+			string worldPath = MyFileSystem.SavesPath;
 			worldPath += FILE_PREFIX + steamId + FILE_SUFFIX;
 
 			character.Export(new FileInfo(worldPath));
 		}
 
 		#endregion
+
+		/// <summary>
+		/// This event handler is not used in this project but is necessary to respect the interface
+		/// </summary>
+		/// <param name="entity"></param>
+		public void OnCharacterCreated(CharacterEntity entity)
+		{
+		}
+
+		/// <summary>
+		/// OnCharacterDeleted event handler
+		/// </summary>
+		/// <param name="entity">Character entity</param>
+		public void OnCharacterDeleted(CharacterEntity entity)
+		{
+			if(m_deletedCharacterEntity.ContainsKey(entity.SteamId))
+			{
+				m_deletedCharacterEntity[entity.SteamId] = entity;
+			}
+			else
+			{
+				m_deletedCharacterEntity.Add(entity.SteamId, entity);
+			}
+		}
 	}
 }
