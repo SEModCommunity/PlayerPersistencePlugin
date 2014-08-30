@@ -18,6 +18,7 @@ using SEModAPIInternal.Support;
 using VRageMath;
 using VRage.Common.Utils;
 using System.IO;
+using System.Threading;
 
 namespace PlayerPersistencePlugin
 {
@@ -31,6 +32,7 @@ namespace PlayerPersistencePlugin
 
 		private SandboxGameAssemblyWrapper m_gameAssemblyWrapper;
 		private Dictionary<ulong, CharacterEntity> m_deletedCharacterEntity;
+		private Mutex m_mutex;
 
 		#endregion
 
@@ -41,6 +43,7 @@ namespace PlayerPersistencePlugin
 			m_gameAssemblyWrapper = SandboxGameAssemblyWrapper.Instance;
 
 			m_deletedCharacterEntity = new Dictionary<ulong, CharacterEntity>();
+			m_mutex = new Mutex();
 		}
 
 		public override void Init()
@@ -61,27 +64,6 @@ namespace PlayerPersistencePlugin
 		/// <param name="character">Ingame Character of the player</param>
 		public void OnPlayerJoined(ulong remoteUserId)
 		{
-			Console.WriteLine(CONSOLE_PREFIX + "Player " + remoteUserId + " joined the server. Loading player data...");
-			try
-			{
-				//CharacterEntity player = GetPlayerEntity(remoteUserId);
-				CharacterEntity playerInfo = LoadPlayerInfo(remoteUserId);
-
-				if (playerInfo == null)
-				{
-					Console.WriteLine(CONSOLE_PREFIX + "Player " + remoteUserId + " (" + remoteUserId + ") has no saved data.");
-				}
-				else
-				{
-					Console.WriteLine(CONSOLE_PREFIX + "Finished loading " + remoteUserId + " data.");
-				}
-			}
-			catch(Exception ex)
-			{
-				Console.WriteLine(CONSOLE_PREFIX + "Error: An error occured while trying to read " + remoteUserId + " data.");
-				Console.WriteLine(CONSOLE_PREFIX + "Read the server log for more details.");
-				LogManager.APILog.WriteLine(CONSOLE_PREFIX + ex);
-			}
 		}
 
 		/// <summary>
@@ -93,19 +75,27 @@ namespace PlayerPersistencePlugin
 		{
 			try
 			{
-				CharacterEntity player = m_deletedCharacterEntity[remoteUserId];
+				if (!m_deletedCharacterEntity.ContainsKey(remoteUserId))
+				{
+					Console.WriteLine(CONSOLE_PREFIX + " Error! The user " + remoteUserId + " was not found.");
+				}
+				else
+				{
+					CharacterEntity player = m_deletedCharacterEntity[remoteUserId];
 
-				Console.WriteLine(CONSOLE_PREFIX + "Player " + remoteUserId + " left the server. Saving player data...");
+					Console.WriteLine(CONSOLE_PREFIX + "Player " + remoteUserId + " left the server. Saving player data...");
 
-				//CharacterEntity player = GetPlayerEntity(remoteUserId);			
-				SavePlayerInfo(remoteUserId, player);
-				Console.WriteLine(CONSOLE_PREFIX + "Player " + player.Name + "'s (" + remoteUserId + ") data saved correctly.");
+					//CharacterEntity player = GetPlayerEntity(remoteUserId);			
+					SavePlayerInfo(remoteUserId, player);
+					m_deletedCharacterEntity.Remove(remoteUserId);
+					Console.WriteLine(CONSOLE_PREFIX + "Player " + player.Name + "'s (" + remoteUserId + ") data saved correctly.");
+				}
 			}
 			catch (Exception ex)
 			{
 				Console.WriteLine(CONSOLE_PREFIX + "Error: An error occured while trying to save " + remoteUserId + " data.");
 				Console.WriteLine(CONSOLE_PREFIX + "Read the server log for more details.");
-				LogManager.APILog.WriteLine(CONSOLE_PREFIX + ex);
+				LogManager.ErrorLog.WriteLine(CONSOLE_PREFIX + ex);
 			}
 		}
 
@@ -144,8 +134,8 @@ namespace PlayerPersistencePlugin
 		/// <returns>Return the character of the player, or null if no info were found</returns>
 		private CharacterEntity LoadPlayerInfo(ulong steamId)
 		{
-			string worldPath = MyFileSystem.SavesPath;
-			worldPath += FILE_PREFIX + steamId + FILE_SUFFIX;
+			string worldPath = m_gameAssemblyWrapper.GetServerConfig().LoadWorld;
+			worldPath += "\\" + FILE_PREFIX + steamId + FILE_SUFFIX;
 
 			if (!File.Exists(worldPath))
 				return null;
@@ -163,8 +153,8 @@ namespace PlayerPersistencePlugin
 		/// <param name="character">Character of the player</param>
 		private void SavePlayerInfo(ulong steamId, CharacterEntity character)
 		{
-			string worldPath = MyFileSystem.SavesPath;
-			worldPath += FILE_PREFIX + steamId + FILE_SUFFIX;
+			string worldPath = m_gameAssemblyWrapper.GetServerConfig().LoadWorld;
+			worldPath += "\\" + FILE_PREFIX + steamId + FILE_SUFFIX;
 
 			character.Export(new FileInfo(worldPath));
 		}
@@ -177,6 +167,69 @@ namespace PlayerPersistencePlugin
 		/// <param name="entity"></param>
 		public void OnCharacterCreated(CharacterEntity entity)
 		{
+			//if the character is contained in the dictionnary, then the player just respawed
+			if (m_deletedCharacterEntity.ContainsKey(entity.SteamId))
+			{
+				m_deletedCharacterEntity[entity.SteamId] = entity;
+				Console.WriteLine(CONSOLE_PREFIX + "Player " + entity.Name + " (" + entity.SteamId + ") respawned.");
+			}
+			//If it is not contained inside the dictionnary, then the player just joined the server
+			else
+			{
+				m_deletedCharacterEntity.Add(entity.SteamId, entity);
+
+				Console.WriteLine(CONSOLE_PREFIX + "Player " + entity.Name + " (" + entity.SteamId + ") joined the server. Loading player data...");
+				try
+				{
+					CharacterEntity playerInfo = LoadPlayerInfo(entity.SteamId);
+
+					if (playerInfo == null)
+					{
+						Console.WriteLine(CONSOLE_PREFIX + "Player " + entity.SteamId + " (" + entity.SteamId + ") has no saved data.");
+					}
+					else
+					{
+						entity.Health = playerInfo.Health;
+						entity.BatteryLevel = playerInfo.BatteryLevel;
+
+						entity.Inventory.RefreshInventory();
+						Thread.Sleep(1500);
+
+						Console.WriteLine(CONSOLE_PREFIX + "Removing entities: " + entity.Inventory.Items.Count);
+
+						foreach (InventoryItemEntity currentItem in entity.Inventory.Items)
+						{
+							entity.Inventory.DeleteEntry(currentItem);
+							entity.Inventory.NextItemId--;
+						}
+
+						//Fill the inventory
+						int i = 0;
+						foreach (InventoryItemEntity currentItem in playerInfo.Inventory.Items)
+						{
+							Console.WriteLine(CONSOLE_PREFIX + "Adding entities: " + i++ + " - " + currentItem.Name);
+							entity.Inventory.NewEntry(currentItem);
+							entity.Inventory.NextItemId++;
+
+							Thread.Sleep(150);
+						}
+						
+						//entity.LightEnabled = playerInfo.LightEnabled;
+						//entity.JetpackEnabled = playerInfo.JetpackEnabled;
+						//entity.DampenersEnabled = playerInfo.DampenersEnabled;
+
+
+						Console.WriteLine(CONSOLE_PREFIX + "Finished loading " + entity.SteamId + " (" + entity.SteamId + ") data.");
+					}
+				}
+				catch (Exception ex)
+				{
+					Console.WriteLine(CONSOLE_PREFIX + "Error: An error occured while trying to read " + entity.SteamId + " (" + entity.SteamId + ") data.");
+					Console.WriteLine(CONSOLE_PREFIX + "Read the server log for more details.");
+					LogManager.APILog.WriteLine(CONSOLE_PREFIX + ex);
+				}
+
+			}
 		}
 
 		/// <summary>
@@ -185,14 +238,6 @@ namespace PlayerPersistencePlugin
 		/// <param name="entity">Character entity</param>
 		public void OnCharacterDeleted(CharacterEntity entity)
 		{
-			if(m_deletedCharacterEntity.ContainsKey(entity.SteamId))
-			{
-				m_deletedCharacterEntity[entity.SteamId] = entity;
-			}
-			else
-			{
-				m_deletedCharacterEntity.Add(entity.SteamId, entity);
-			}
 		}
 	}
 }
